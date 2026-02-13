@@ -26,7 +26,7 @@ private:
 
 public:
     TQueue();
-    ~TQueue() = default;
+    virtual ~TQueue() = default;
     bool enqueue(T& task);
     bool dequeue(T& task);
     size_t size() const;
