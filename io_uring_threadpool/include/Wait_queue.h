@@ -59,7 +59,7 @@ void Wait_queue<T>::notify_stop() noexcept {
 
 template<typename T>
 void Wait_queue<T>::wait_for_data() noexcept {
-    io_uring_peek_cqe(&ring,&cqe);
+    io_uring_wait_cqe(&ring,&cqe);
     io_uring_cqe_seen(&ring,cqe);
 }
 
