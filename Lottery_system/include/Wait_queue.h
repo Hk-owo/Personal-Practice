@@ -19,9 +19,10 @@ class Wait_queue : public TQueue<T>{
 private:
     //这一部分是启动信号处理
     struct io_uring ring;
-    struct io_uring_sqe* sqe;
+    struct io_uring_sqe* sqe,* stop;
     struct io_uring_cqe* cqe;
-    int fd,ring_fd;
+    int ring_fd;
+    std::condition_variable cv;
 
     T result;
     std::coroutine_handle<> m_waiter;
@@ -49,16 +50,18 @@ public:
     void notify_stop() noexcept;
 };
 
+
 template<typename T>
 void Wait_queue<T>::notify_stop() noexcept {
-    io_uring_prep_poll_remove(sqe,fd);
-    io_uring_prep_poll_add(sqe,fd,POLL_IN);
+    io_uring_prep_nop(stop);
     io_uring_submit(&ring);
 }
 
 template<typename T>
 void Wait_queue<T>::wait_for_data() noexcept {
-    io_uring_peek_cqe(&ring,&cqe);
+    io_uring_wait_cqe(&ring,&cqe);
+    if(cqe->user_data)
+        return;
     io_uring_cqe_seen(&ring,cqe);
 }
 
@@ -67,34 +70,30 @@ void Wait_queue<T>::on_data_ready() noexcept {
 //    if (!m_waiter) return;
 //        auto h = std::exchange(*m_waiter, {});
 //        if (h && !h.done()) h.resume();
-    io_uring_prep_poll_remove(sqe,fd);
-    io_uring_prep_poll_add(sqe,fd,POLL_IN);
+    io_uring_prep_nop(sqe);
     io_uring_submit(&ring);
 }
 
 template<typename T>
 Wait_queue<T>::~Wait_queue() {
-    if(fd != -1){
-        ::close(fd);
-        io_uring_queue_exit(&ring);
-        ring_fd = -1;
-    }
     m_waiter= nullptr;
-    sqe = nullptr,cqe = nullptr;
+    sqe = nullptr, cqe = nullptr;
 }
 
 template<typename T>
 Wait_queue<T>::Wait_queue() {
     ring_fd = io_uring_queue_init(256, &ring, 0);
-    fd = eventfd(1, EFD_NONBLOCK | EFD_CLOEXEC);
-    if(ring_fd < 0 | fd < 0){
+    if(ring_fd < 0){
         std::cerr << "create fd faild.\n";
         return;
     }
 
     sqe = io_uring_get_sqe(&ring);
-    io_uring_prep_poll_add(sqe,fd,POLL_IN);
-    io_uring_submit(&ring);
+    //这个表明是on_data_ready发出的
+    sqe->user_data = 0;
+    stop = io_uring_get_sqe(&ring);
+    //表明是notify_all发出的
+    stop->user_data = 1;
 }
 
 #endif //IO_URING_SERVER_WAIT_QUEUE_H
