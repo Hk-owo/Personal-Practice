@@ -13,16 +13,18 @@
  * 没做多线程竞争冗余
  * 多消费者会free句柄多次
  * 目前只做SPSC的单消费者
+ * 这个等待队列实际上没有等待纯cpu轮询
+ * 如果任务量不大的情况下可以把函数内的/**//*部分替换函数内的全部内容，并把sqe变量给注释了，这个时候就是等待队列了
  */
 template<typename T>
 class Wait_queue : public TQueue<T>{
 private:
     //这一部分是启动信号处理
     struct io_uring ring;
-    struct io_uring_sqe* sqe,* stop;
+    //任务量不大的时候把这里的sqe注释了
+    struct io_uring_sqe* sqe;
     struct io_uring_cqe* cqe;
     int ring_fd;
-    std::condition_variable cv;
 
     T result;
     std::coroutine_handle<> m_waiter;
@@ -53,15 +55,24 @@ public:
 
 template<typename T>
 void Wait_queue<T>::notify_stop() noexcept {
-    io_uring_prep_nop(stop);
+    /*
+    io_uring_sqe* sqe = io_uring_get_sqe(&ring);
+    sqe->user_data = 1;
+    io_uring_prep_nop(sqe);
     io_uring_submit(&ring);
+    */
+    on_data_ready();
 }
 
 template<typename T>
 void Wait_queue<T>::wait_for_data() noexcept {
+    /*
     io_uring_wait_cqe(&ring,&cqe);
     if(cqe->user_data)
         return;
+    io_uring_cqe_seen(&ring,cqe);
+    */
+    io_uring_peek_cqe(&ring,&cqe);
     io_uring_cqe_seen(&ring,cqe);
 }
 
@@ -70,6 +81,14 @@ void Wait_queue<T>::on_data_ready() noexcept {
 //    if (!m_waiter) return;
 //        auto h = std::exchange(*m_waiter, {});
 //        if (h && !h.done()) h.resume();
+
+    /*
+    io_uring_sqe* sqe = io_uring_get_sqe(&ring);
+    //这个表明是on_data_ready发出的
+    sqe->user_data = 0;
+    io_uring_prep_nop(sqe);
+    io_uring_submit(&ring);
+    */
     io_uring_prep_nop(sqe);
     io_uring_submit(&ring);
 }
@@ -78,7 +97,9 @@ template<typename T>
 Wait_queue<T>::~Wait_queue() {
     io_uring_queue_exit(&ring);
     m_waiter= nullptr;
-    sqe = nullptr, cqe = nullptr;
+    //任务量不大的时候注释这里
+    sqe = nullptr;
+    cqe = nullptr;
 }
 
 template<typename T>
@@ -89,12 +110,8 @@ Wait_queue<T>::Wait_queue() {
         return;
     }
 
+    //任务量不大的话这里也要注释
     sqe = io_uring_get_sqe(&ring);
-    //这个表明是on_data_ready发出的
-    sqe->user_data = 0;
-    stop = io_uring_get_sqe(&ring);
-    //表明是notify_all发出的
-    stop->user_data = 1;
 }
 
 #endif //IO_URING_SERVER_WAIT_QUEUE_H
