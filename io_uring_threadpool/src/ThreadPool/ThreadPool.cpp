@@ -8,34 +8,38 @@ using namespace std;
 
 ThreadPool::ThreadPool() {
     m_thread.resize(TSIZE);
+    is_finish.resize(TSIZE, false);
     //工作线程
     for(int i = 0;i < TSIZE - 1;i++){
         m_thread[i] = thread([i,this]{
-            auto coro = work(i);
-            auto w = coro.get_handle();
-            while(w && !w.done()){
-                w.resume();
+            CoroWait coro = work(i);
+            while(!coro.done()) {
+                coro.resume();
                 m_queue[i].wait_for_data();
             }
+            is_finish[i] = true;
         });
     }
     //分发线程
     m_thread[TSIZE - 1] = thread([this]{
-        auto coro = distribute();
-        auto w = coro.get_handle();
-        while(w && !w.done()){
-            w.resume();
+        CoroWait coro = distribute();
+        while(!coro.done()){
+            coro.resume();
             m_queue[TSIZE - 1].wait_for_data();
         }
+        is_finish[TSIZE - 1] = true;
     });
 }
 
 ThreadPool::~ThreadPool() {
     stop.store(true, std::memory_order_release);
-    for (auto& q : m_queue) q.notify_stop();
-    for (auto& t : m_thread) {
-        if(t.joinable())
-            t.join();
+    for(int i = 0;i < TSIZE;i++){
+        m_queue[i].notify_stop();
+        if(is_finish[i] == true) {
+            if (m_thread[i].joinable())
+                m_thread[i].join();
+        }
+        else i--;
     }
 }
 
@@ -62,16 +66,15 @@ CoroWait ThreadPool::distribute() {
         }
 
         //如果存货达到BATCH_SIZE时候唤醒
-        if(task && !(batch & BATCH_SIZE - 1)){
+        if(task && !(batch & (BATCH_SIZE - 1))){
             //入队
             m_queue[minldx].enqueue(task);
-            for(int i = 0;i < TSIZE - 1;i++)
-                m_queue[i].on_data_ready();
+            m_queue[minldx].on_data_ready();
             batch = 0;
         }
         else if(task){
             //分发的时候选择最少任务的派发实现负载均衡(每MINLDX_SIZE任务采样一次)
-            if (!(batch & MINLDX_SIZE - 1)) {
+            if (!(batch & (MINLDX_SIZE - 1))) {
                 for (int i = 0; i < TSIZE - 1; ++i)
                     if (m_queue[i].size() < m_queue[minldx].size()) minldx = i;
             }
@@ -86,7 +89,22 @@ CoroWait ThreadPool::distribute() {
 
 //线程池的提交函数
 void ThreadPool::submit(std::function<void()> f) {
+    if(isclose.load(std::memory_order_acquire)){
+        cout << "this threadpool is close.error.";
+        return;
+    }
     auto& q = m_queue[TSIZE - 1];
     q.enqueue(f);
     q.on_data_ready();
 }
+
+void ThreadPool::close() {
+    stop.store(true, std::memory_order_release);
+    for (auto& q : m_queue) q.notify_stop();
+    for (auto& t : m_thread) {
+        if(t.joinable())
+            t.join();
+    }
+    isclose.store(true,std::memory_order_release);
+}
+
