@@ -41,7 +41,7 @@ size_t TQueue<T>::size() const {
 
 template<typename T>
 TQueue<T>::TQueue() {
-    m_queue.resize(QSIZE);
+    m_queue.resize(QSIZE,{});
 }
 
 template<typename T>
