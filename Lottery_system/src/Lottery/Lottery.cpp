@@ -17,52 +17,52 @@ Lottery::Lottery(std::string port): Tcp_server(port) {
         }
     });
     m_thread[1] = thread([this]{
+        //这个是纯io_uring等待队列的实现
         while(!stop.load(memory_order_relaxed)){
             std::pair<int,int> tmp;
-            if(fd_queue.dequeue(tmp)){
-                string message;
+            if(fd_queue.dequeue_uring(tmp)){
+                int message = 0;
                 for(int i = 0;i < tmp.second;i++) {
                     bool res;
-                    if (!res_queue.dequeue(res)) {
+                    if (!res_queue.dequeue_uring(res)) {
                         generate_random_result();
-                        res_queue.dequeue(res);
+                        res_queue.dequeue_uring(res);
                     }
-                    if (res) message += "Y\n";
-                    else message += "N\n";
+                    if (res) message |= 1 << i;
                 }
-                submit_send_event(tmp.first,message);
-            }else fd_queue.wait_for_data();
+                //cout <<  message << '\n';
+                submit_send_event(tmp.first,std::to_string(message));
+            }else fd_queue.wait_for_data_uring();
         }
+        //io_uring+协程实现
+//        CoroWait coro = work();
+//        while(!coro.done()){
+//            coro.resume();
+//            fd_queue.wait_for_data();
+//        }
     });
 }
 
 Lottery::~Lottery(){
     stop.store(true,memory_order_relaxed);
-    fd_queue.notify_stop();
+    fd_queue.notify_stop_uring();
     io_uring_queue_exit(&ring);
     io_uring_queue_exit(&send_ring);
     for(auto& e : m_thread)
         if(e.joinable()) e.join();
 }
 
-//void Lottery::event_init() {
-//    eventfd = ::eventfd(1, EFD_NONBLOCK | EFD_CLOEXEC);
-//    if(eventfd <= 0){
-//        cout << "eventfd init error\n";
-//        exit(eventfd);
-//    }
-//}
-
 void Lottery::generate_random_result() {
     // 1. 引擎：32 位 Mersenne Twister（速度快、周期长 2^19937-1）
     static std::mt19937 rng(std::random_device{}()); // 只用一次系统真随机种子
 
-    // 2. 分布：闭区间 [1,1 << 10]
-    static std::uniform_int_distribution<int> dist(1, 1 << 10);
+    // 2. 分布：闭区间 [1,1 << n]
+    const int n = 7;
+    static std::uniform_int_distribution<int> dist(1, 1 << n);
 
-    for(int i = 0; i < 1 << 14; i++) {
+    for(int i = 0; i < 1 << 12; i++) {
         int res = dist(rng);
-        bool tmp = (res >> 10) & 1;
+        bool tmp = (res >> n) & 1;
         res_queue.enqueue(tmp);
     }
 }
@@ -134,12 +134,12 @@ int Lottery::handle_receice_event(io_uring_cqe *cqe, string& message) {
         if (message == "Request : Lottery(1)\n") {
             auto tmp = make_pair(fd,1);
             fd_queue.enqueue(tmp);
-            fd_queue.on_data_ready();
+            fd_queue.on_data_ready_uring();
         }
         else if(message == "Request : Lottery(10)\n") {
             auto tmp = make_pair(fd,10);
             fd_queue.enqueue(tmp);
-            fd_queue.on_data_ready();
+            fd_queue.on_data_ready_uring();
         }
 //    else
 //        message = "Please send corrert Request\n";
@@ -188,4 +188,22 @@ int Lottery::handle_send_event(io_uring_cqe *cqe) {
     return cqe->res;
 }
 
-
+CoroWait Lottery::work() {
+    while(!stop.load(memory_order_relaxed)) {
+        std::pair<int, int> tmp;
+        tmp = co_await fd_queue;
+        if(tmp.second == 0) continue;
+        int message;
+        for (int i = 0; i < tmp.second; i++) {
+            bool res;
+            if (!res_queue.dequeue_uring(res)) {
+                generate_random_result();
+                res_queue.dequeue_uring(res);
+            }
+            if (res) message |= 1 << i;
+        }
+        //cout <<  message << '\n';
+        submit_send_event(tmp.first, std::to_string(message));
+    }
+    co_return;
+}
