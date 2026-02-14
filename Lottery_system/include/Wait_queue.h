@@ -5,7 +5,6 @@
 #ifndef IO_URING_SERVER_WAIT_QUEUE_H
 #define IO_URING_SERVER_WAIT_QUEUE_H
 
-#include "CoroWait.h"
 #include "TQueue.h"
 
 /*
@@ -19,10 +18,8 @@ class Wait_queue : public TQueue<T>{
 private:
     //这一部分是启动信号处理
     struct io_uring ring;
-    struct io_uring_sqe* sqe,* stop;
     struct io_uring_cqe* cqe;
     int ring_fd;
-    std::condition_variable cv;
 
     T result;
     std::coroutine_handle<> m_waiter;
@@ -53,7 +50,9 @@ public:
 
 template<typename T>
 void Wait_queue<T>::notify_stop() noexcept {
-    io_uring_prep_nop(stop);
+    io_uring_sqe* sqe = io_uring_get_sqe(&ring);
+    sqe->user_data = 1;
+    io_uring_prep_nop(sqe);
     io_uring_submit(&ring);
 }
 
@@ -70,6 +69,10 @@ void Wait_queue<T>::on_data_ready() noexcept {
 //    if (!m_waiter) return;
 //        auto h = std::exchange(*m_waiter, {});
 //        if (h && !h.done()) h.resume();
+
+    io_uring_sqe* sqe = io_uring_get_sqe(&ring);
+    //这个表明是on_data_ready发出的
+    sqe->user_data = 0;
     io_uring_prep_nop(sqe);
     io_uring_submit(&ring);
 }
@@ -78,7 +81,7 @@ template<typename T>
 Wait_queue<T>::~Wait_queue() {
     io_uring_queue_exit(&ring);
     m_waiter= nullptr;
-    sqe = nullptr, cqe = nullptr;
+    cqe = nullptr;
 }
 
 template<typename T>
@@ -88,13 +91,6 @@ Wait_queue<T>::Wait_queue() {
         std::cerr << "create fd faild.\n";
         return;
     }
-
-    sqe = io_uring_get_sqe(&ring);
-    //这个表明是on_data_ready发出的
-    sqe->user_data = 0;
-    stop = io_uring_get_sqe(&ring);
-    //表明是notify_all发出的
-    stop->user_data = 1;
 }
 
 #endif //IO_URING_SERVER_WAIT_QUEUE_H
