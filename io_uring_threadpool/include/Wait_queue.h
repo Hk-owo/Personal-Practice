@@ -76,6 +76,7 @@ void Wait_queue<T>::on_data_ready() noexcept {
 
 template<typename T>
 Wait_queue<T>::~Wait_queue() {
+    io_uring_queue_exit(&ring);
     m_waiter= nullptr;
     sqe = nullptr, cqe = nullptr;
 }
