@@ -1,80 +1,142 @@
 //
-// Created by lacas on 2025/12/8.
+// Created by lacas on 2025/12/10.
 //
 
-#ifndef IO_URING_SERVER_TQUEUE_H
-#define IO_URING_SERVER_TQUEUE_H
+#ifndef IO_URING_SERVER_WAIT_QUEUE_H
+#define IO_URING_SERVER_WAIT_QUEUE_H
+
+#include "TQueue.h"
+#include "CoroWait.h"
+#include "liburing.h"
+#include "sys/eventfd.h"
 
 /*
- * 标准的SPSC队列 单生产者单消费者
- * 生产者是主线程
- * 获取已完成的任务加入队列
- * 默认buffer是1 << 21 6个线程
+ * 没做多线程竞争冗余
+ * 多消费者会free句柄多次
+ * 目前只做SPSC的单消费者
+ * 有uring后缀的是用io_uring来实现的消息队列，速度较慢
+ * 其他则是由协程实现的，速度较快
  */
 template<typename T>
-class TQueue{
+class Wait_queue : public TQueue<T>{
 private:
-    //ring队列长度
-    //必须是2的幂次，这里用了位运算来求模，不然会越界
-    const size_t QSIZE = 1 << 21;
-    //线程数量
-    const size_t TSIZE = 6;
+    static const int SIZE = 128;
+    //这一部分是启动信号处理
+    struct io_uring ring;
+    struct io_uring_cqe* cqe;
+    int ring_fd, peek_times = 1;
 
-    alignas(std::hardware_constructive_interference_size) std::atomic<size_t> m_head{0};
-    alignas(std::hardware_constructive_interference_size) std::atomic<size_t> m_tail{0};
-    std::vector<T> m_queue;
-
+    T result;
 public:
-    TQueue();
-    virtual ~TQueue() = default;
-    bool enqueue(T& task);
-    bool dequeue(T& task);
-    size_t size() const;
+    class Waiter{
+    private:
+        Wait_queue* q;
+    public:
+        Waiter(Wait_queue* queue): q(queue){};
+        bool await_ready() { return q->dequeue(q->result);}
+        void await_suspend(std::coroutine_handle<> h){q->m_waiter.store(h,std::memory_order_relaxed);}
+        T await_resume(){ return std::move(q->result); }
+    };
+private:
+    std::atomic<std::coroutine_handle<>> m_waiter{nullptr};
+public:
+    Wait_queue();
+    ~Wait_queue();
+
+    //给一个wait接口
+    auto operator co_await(){return Waiter{this};}
+    //唤醒
+    void on_data_ready_uring() noexcept;
+    //等待
+    void wait_for_data_uring() noexcept;
+    //阻塞唤醒
+    void notify_stop_uring() noexcept;
+    //非阻塞查看
+    void peek_uring() noexcept;
+    //阻塞等待
+    void wait_uring() noexcept;
+    bool dequeue_uring(T& task);
+
+    //唤醒协程
+    void on_data_ready() noexcept;
+    //阻塞唤醒
+    void notify_stop() noexcept;
 };
 
 template<typename T>
-size_t TQueue<T>::size() const {
-    size_t t = m_tail.load(std::memory_order_acquire);
-    size_t h = m_head.load(std::memory_order_acquire);
-    return (t - h) & (QSIZE - 1);
+void Wait_queue<T>::notify_stop() noexcept {
+    on_data_ready();
 }
 
 template<typename T>
-TQueue<T>::TQueue() {
-    m_queue.resize(QSIZE);
-}
-
-template<typename T>
-bool TQueue<T>::enqueue(T& task) {
-    while(1) {
-        const size_t tail = m_tail.load(std::memory_order_relaxed);
-        //const size_t next = (tail + 1) % QSIZE;
-        const size_t next = (tail + 1) & (QSIZE - 1);
-
-        //检查是否已满
-        if (next == m_head.load(std::memory_order_acquire)) {
-            std::this_thread::yield();
-            continue;
-        }
-
-        m_queue[tail] = move(task);
-        m_tail.store(next, std::memory_order_release);
-        return true;
+void Wait_queue<T>::on_data_ready() noexcept {
+    std::coroutine_handle<> h = nullptr;
+    m_waiter.exchange(h);
+    if (h && !h.done()) {
+        h.resume();
+        return;
     }
 }
 
 template<typename T>
-bool TQueue<T>::dequeue(T &task) {
-    const size_t head = m_head.load(std::memory_order_relaxed);
-
-    //检查是否为空
-    if(head == m_tail.load(std::memory_order_acquire))
-        return false;
-
-    task = move(m_queue[head]);
-    const size_t next = (head + 1) % QSIZE;
-    m_head.store(next, std::memory_order_release);
-    return true;
+void Wait_queue<T>::wait_uring() noexcept {
+    io_uring_wait_cqe(&ring,&cqe);
+    if(cqe->user_data)
+        return;
+    io_uring_cqe_seen(&ring,cqe);
 }
 
-#endif //IO_URING_SERVER_TQUEUE_H
+template<typename T>
+bool Wait_queue<T>::dequeue_uring(T &task) {
+    bool res = TQueue<T>::dequeue(task);
+    if(!res)
+        peek_times++;
+    else peek_times = 1;
+    return res;
+}
+
+template<typename T>
+void Wait_queue<T>::peek_uring() noexcept {
+    io_uring_peek_cqe(&ring,&cqe);
+    io_uring_cqe_seen(&ring,cqe);
+}
+
+template<typename T>
+void Wait_queue<T>::notify_stop_uring() noexcept {
+    io_uring_sqe* stop = io_uring_get_sqe(&ring);
+    stop->user_data = 1;
+    io_uring_prep_nop(stop);
+    io_uring_submit(&ring);
+}
+
+template<typename T>
+void Wait_queue<T>::wait_for_data_uring() noexcept {
+    if(!(peek_times & ((1 << 18) - 1 ))){
+        peek_times = 1;
+        wait_uring();
+    }
+    else peek_uring();
+}
+
+template<typename T>
+void Wait_queue<T>::on_data_ready_uring() noexcept {
+    io_uring_sqe* sqe = io_uring_get_sqe(&ring);
+    io_uring_submit(&ring);
+}
+
+template<typename T>
+Wait_queue<T>::~Wait_queue() {
+    io_uring_queue_exit(&ring);
+    cqe = nullptr;
+}
+
+template<typename T>
+Wait_queue<T>::Wait_queue() {
+    ring_fd = io_uring_queue_init(256, &ring, 0);
+    if(ring_fd < 0){
+        std::cerr << "create fd faild.\n";
+        return;
+    }
+}
+
+#endif //IO_URING_SERVER_WAIT_QUEUE_H
