@@ -6,50 +6,77 @@
 #define IO_URING_SERVER_WAIT_QUEUE_H
 
 #include "TQueue.h"
+#include "CoroWait.h"
+#include "liburing.h"
 
 /*
- * 利用协程完成队列的阻塞等待
  * 没做多线程竞争冗余
  * 多消费者会free句柄多次
  * 目前只做SPSC的单消费者
+ * 有uring后缀的是用io_uring来实现的阻塞等待队列，速度较慢
+ * 还有就是协程和uring混合实现的阻塞等待队列，只要把注释的代码取消就行
+ * 最后就是完全由协程实现的阻塞消息队列，但是需要一个而外的不会终止线程来处理，因为协程挂起以后线程会直接继续执行后面的内容，导致线程提前结束，这个速度最快
  */
 template<typename T>
 class Wait_queue : public TQueue<T>{
 private:
+    static const int SIZE = 128;
     //这一部分是启动信号处理
     struct io_uring ring;
     struct io_uring_cqe* cqe;
-    int ring_fd;
+    int ring_fd, peek_times = 1;
 
-    T result;
-    std::coroutine_handle<> m_waiter;
+    T result={};
+public:
+    class Waiter{
+    private:
+        Wait_queue* q;
+    public:
+        Waiter(Wait_queue* queue): q(queue){};
+        bool await_ready() { return q->dequeue(q->result);}
+        void await_suspend(std::coroutine_handle<> h){q->m_waiter.store(h,std::memory_order_relaxed);}
+        T await_resume(){ return std::exchange(q->result,{}); }
+    };
+private:
+    std::atomic<std::coroutine_handle<>> m_waiter{nullptr};
 public:
     Wait_queue();
     ~Wait_queue();
-public:
-    class wait {
-    public:
-        Wait_queue* q;
-        bool await_ready() noexcept {return q->dequeue(q->result);}
-        void await_suspend(std::coroutine_handle<> h) noexcept { q->m_waiter = h;};
-        T await_resume() noexcept { return std::move(q->result); }
-    };
 
     //给一个wait接口
-    auto operator co_await(){return wait{this};}
-    //是否准备
-    bool await_ready() noexcept {return wait{this}.await_ready();}
+    auto operator co_await(){return Waiter{this};}
+    //唤醒
+    void on_data_ready_uring() noexcept;
+    //等待
+    void wait_for_data_uring() noexcept;
+    //阻塞唤醒
+    void notify_stop_uring() noexcept;
+    //非阻塞查看
+    void peek_uring() noexcept;
+    //阻塞等待
+    void wait_uring() noexcept;
+    bool dequeue_uring(T& task);
+
     //唤醒协程
     void on_data_ready() noexcept;
-    //阻塞等待
-    void wait_for_data() noexcept;
     //阻塞唤醒
     void notify_stop() noexcept;
+    //阻塞等待协程
+    void wait_for_data() noexcept;
 };
 
+template<typename T>
+void Wait_queue<T>::wait_for_data() noexcept {
+    wait_uring();
+}
 
 template<typename T>
 void Wait_queue<T>::notify_stop() noexcept {
+    std::coroutine_handle<> h = nullptr;
+    m_waiter.exchange(h);
+    if (h && !h.done()) {
+        h.resume();
+    }
     io_uring_sqe* sqe = io_uring_get_sqe(&ring);
     sqe->user_data = 1;
     io_uring_prep_nop(sqe);
@@ -57,7 +84,20 @@ void Wait_queue<T>::notify_stop() noexcept {
 }
 
 template<typename T>
-void Wait_queue<T>::wait_for_data() noexcept {
+void Wait_queue<T>::on_data_ready() noexcept {
+    std::coroutine_handle<> h = nullptr;
+    m_waiter.exchange(h);
+    if (h && !h.done()) {
+        h.resume();
+    }
+    io_uring_sqe* sqe = io_uring_get_sqe(&ring);
+    sqe->user_data = 0;
+    io_uring_prep_nop(sqe);
+    io_uring_submit(&ring);
+}
+
+template<typename T>
+void Wait_queue<T>::wait_uring() noexcept {
     io_uring_wait_cqe(&ring,&cqe);
     if(cqe->user_data)
         return;
@@ -65,22 +105,46 @@ void Wait_queue<T>::wait_for_data() noexcept {
 }
 
 template<typename T>
-void Wait_queue<T>::on_data_ready() noexcept {
-//    if (!m_waiter) return;
-//        auto h = std::exchange(*m_waiter, {});
-//        if (h && !h.done()) h.resume();
+bool Wait_queue<T>::dequeue_uring(T &task) {
+    bool res = TQueue<T>::dequeue(task);
+    if(!res)
+        peek_times++;
+    else peek_times = 1;
+    return res;
+}
 
+template<typename T>
+void Wait_queue<T>::peek_uring() noexcept {
+    io_uring_peek_cqe(&ring,&cqe);
+    io_uring_cqe_seen(&ring,cqe);
+}
+
+template<typename T>
+void Wait_queue<T>::notify_stop_uring() noexcept {
+    io_uring_sqe* stop = io_uring_get_sqe(&ring);
+    stop->user_data = 1;
+    io_uring_prep_nop(stop);
+    io_uring_submit(&ring);
+}
+
+template<typename T>
+void Wait_queue<T>::wait_for_data_uring() noexcept {
+    if(!(peek_times & ((1 << 18) - 1 ))){
+        peek_times = 1;
+        wait_uring();
+    }
+    else peek_uring();
+}
+
+template<typename T>
+void Wait_queue<T>::on_data_ready_uring() noexcept {
     io_uring_sqe* sqe = io_uring_get_sqe(&ring);
-    //这个表明是on_data_ready发出的
-    sqe->user_data = 0;
-    io_uring_prep_nop(sqe);
     io_uring_submit(&ring);
 }
 
 template<typename T>
 Wait_queue<T>::~Wait_queue() {
     io_uring_queue_exit(&ring);
-    m_waiter= nullptr;
     cqe = nullptr;
 }
 
