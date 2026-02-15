@@ -15,9 +15,20 @@ ThreadPool::ThreadPool() {
             CoroWait coro = work(i);
             while(!coro.done()) {
                 coro.resume();
-                m_queue[i].wait_for_data();
+                if(!coro.done())
+                    m_queue[i].wait_for_data();
             }
             is_finish[i] = true;
+//            while (!stop.load(memory_order_relaxed)) {
+//                std::function<void()> task;
+//                while (!stop.load(memory_order_relaxed)) {
+//                    if (m_queue[i].dequeue(task)) {
+//                        if (task) task();
+//                    } else break;
+//                }
+//                m_queue[i].wait_for_data_uring();
+//            }
+//            is_finish[i] = true;
         });
     }
     //分发线程
@@ -25,9 +36,43 @@ ThreadPool::ThreadPool() {
         CoroWait coro = distribute();
         while(!coro.done()){
             coro.resume();
-            m_queue[TSIZE - 1].wait_for_data();
+            if(!coro.done())
+                m_queue[TSIZE - 1].wait_for_data();
         }
         is_finish[TSIZE - 1] = true;
+//        while(!stop.load(memory_order_relaxed)){
+//            std::function<void()> task;
+//            size_t minldx = 0;
+//            size_t batch = 0;
+//            while(!stop.load(memory_order_relaxed)){
+//                if(!m_queue[TSIZE - 1].dequeue(task)) {
+//                    for(int i = 0;i < TSIZE - 1;i++)
+//                        m_queue[i].on_data_ready();
+//                    if(!m_queue[TSIZE - 1].dequeue(task)) break;
+//                }
+//
+//                //如果存货达到BATCH_SIZE时候唤醒
+//                if(task && !(batch & (BATCH_SIZE - 1))){
+//                    //入队
+//                    m_queue[minldx].enqueue(task);
+//                    m_queue[minldx].on_data_ready();
+//                    batch = 0;
+//                }
+//                else if(task){
+//                    //分发的时候选择最少任务的派发实现负载均衡(每MINLDX_SIZE任务采样一次)
+//                    if (!(batch & (MINLDX_SIZE - 1))) {
+//                        for (int i = 0; i < TSIZE - 1; ++i)
+//                            if (m_queue[i].size() < m_queue[minldx].size()) minldx = i;
+//                    }
+//                    //入队
+//                    m_queue[minldx].enqueue(task);
+//                    batch++;
+//                }
+//                task = nullptr;
+//            }
+//            m_queue[TSIZE - 1].wait_for_data_uring();
+//        }
+//        is_finish[TSIZE - 1] = true;
     });
 }
 
@@ -100,11 +145,13 @@ void ThreadPool::submit(std::function<void()> f) {
 
 void ThreadPool::close() {
     stop.store(true, std::memory_order_release);
-    for (auto& q : m_queue) q.notify_stop();
-    for (auto& t : m_thread) {
-        if(t.joinable())
-            t.join();
+    for(int i = 0;i < TSIZE;i++){
+        m_queue[i].notify_stop();
+        if(is_finish[i] == true) {
+            if (m_thread[i].joinable())
+                m_thread[i].join();
+        }
+        else i--;
     }
     isclose.store(true,std::memory_order_release);
 }
-
