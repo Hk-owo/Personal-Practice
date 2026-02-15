@@ -7,15 +7,14 @@
 
 #include "TQueue.h"
 #include "CoroWait.h"
-#include "liburing.h"
 
 /*
  * 没做多线程竞争冗余
  * 多消费者会free句柄多次
  * 目前只做SPSC的单消费者
  * 有uring后缀的是用io_uring来实现的阻塞等待队列，速度较慢
- * 还有就是协程和uring混合实现的阻塞等待队列，只要把注释的代码取消就行
- * 最后就是完全由协程实现的阻塞消息队列，但是需要一个而外的不会终止线程来处理，因为协程挂起以后线程会直接继续执行后面的内容，导致线程提前结束，这个速度最快
+ * 还有就是协程和uring混合实现的阻塞等待队列
+ * 最后就是完全由协程实现的消息队列，但是需要一个而外的不会终止线程来处理，因为协程挂起以后线程会直接继续执行后面的内容，导致线程提前结束，可以把一个线程当两个使用来解决
  */
 template<typename T>
 class Wait_queue : public TQueue<T>{
@@ -26,7 +25,7 @@ private:
     struct io_uring_cqe* cqe;
     int ring_fd, peek_times = 1;
 
-    T result={};
+    T result{};
 public:
     class Waiter{
     private:
@@ -55,7 +54,7 @@ public:
     void peek_uring() noexcept;
     //阻塞等待
     void wait_uring() noexcept;
-    bool dequeue_uring(T& task);
+    bool dequeue(T& task);
 
     //唤醒协程
     void on_data_ready() noexcept;
@@ -67,33 +66,23 @@ public:
 
 template<typename T>
 void Wait_queue<T>::wait_for_data() noexcept {
-    wait_uring();
+    wait_for_data_uring();
 }
 
 template<typename T>
 void Wait_queue<T>::notify_stop() noexcept {
-    std::coroutine_handle<> h = nullptr;
-    m_waiter.exchange(h);
-    if (h && !h.done()) {
-        h.resume();
-    }
-    io_uring_sqe* sqe = io_uring_get_sqe(&ring);
-    sqe->user_data = 1;
-    io_uring_prep_nop(sqe);
-    io_uring_submit(&ring);
+    notify_stop_uring();
 }
 
 template<typename T>
 void Wait_queue<T>::on_data_ready() noexcept {
-    std::coroutine_handle<> h = nullptr;
-    m_waiter.exchange(h);
+    std::coroutine_handle<> h = m_waiter.exchange(nullptr);
     if (h && !h.done()) {
-        h.resume();
+        io_uring_sqe* sqe = io_uring_get_sqe(&ring);
+        sqe->user_data = 0;
+        io_uring_prep_nop(sqe);
+        io_uring_submit(&ring);
     }
-    io_uring_sqe* sqe = io_uring_get_sqe(&ring);
-    sqe->user_data = 0;
-    io_uring_prep_nop(sqe);
-    io_uring_submit(&ring);
 }
 
 template<typename T>
@@ -105,7 +94,7 @@ void Wait_queue<T>::wait_uring() noexcept {
 }
 
 template<typename T>
-bool Wait_queue<T>::dequeue_uring(T &task) {
+bool Wait_queue<T>::dequeue(T &task) {
     bool res = TQueue<T>::dequeue(task);
     if(!res)
         peek_times++;
@@ -115,8 +104,10 @@ bool Wait_queue<T>::dequeue_uring(T &task) {
 
 template<typename T>
 void Wait_queue<T>::peek_uring() noexcept {
+    cqe = nullptr;
     io_uring_peek_cqe(&ring,&cqe);
-    io_uring_cqe_seen(&ring,cqe);
+    if(cqe)
+        io_uring_cqe_seen(&ring,cqe);
 }
 
 template<typename T>
@@ -139,6 +130,7 @@ void Wait_queue<T>::wait_for_data_uring() noexcept {
 template<typename T>
 void Wait_queue<T>::on_data_ready_uring() noexcept {
     io_uring_sqe* sqe = io_uring_get_sqe(&ring);
+    sqe->user_data = 0;
     io_uring_submit(&ring);
 }
 
