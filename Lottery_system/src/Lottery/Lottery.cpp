@@ -18,28 +18,29 @@ Lottery::Lottery(std::string port): Tcp_server(port) {
     });
     m_thread[1] = thread([this]{
         //这个是纯io_uring等待队列的实现
-        while(!stop.load(memory_order_relaxed)){
-            std::pair<int,int> tmp;
-            if(fd_queue.dequeue_uring(tmp)){
-                int message = 0;
-                for(int i = 0;i < tmp.second;i++) {
-                    bool res;
-                    if (!res_queue.dequeue_uring(res)) {
-                        generate_random_result();
-                        res_queue.dequeue_uring(res);
-                    }
-                    if (res) message |= 1 << i;
-                }
-                //cout <<  message << '\n';
-                submit_send_event(tmp.first,std::to_string(message));
-            }else fd_queue.wait_for_data_uring();
-        }
-        //io_uring+协程实现
-//        CoroWait coro = work();
-//        while(!coro.done()){
-//            coro.resume();
-//            fd_queue.wait_for_data();
+//        while(!stop.load(memory_order_relaxed)){
+//            std::pair<int,int> tmp;
+//            if(fd_queue.dequeue_uring(tmp)){
+//                int message = 0;
+//                for(int i = 0;i < tmp.second;i++) {
+//                    bool res;
+//                    if (!res_queue.dequeue(res)) {
+//                        generate_random_result();
+//                        res_queue.dequeue(res);
+//                    }
+//                    if (res) message |= 1 << i;
+//                }
+//                //cout <<  message << '\n';
+//                submit_send_event(tmp.first,std::to_string(message));
+//            }else fd_queue.wait_for_data_uring();
 //        }
+        //io_uring+协程实现
+        CoroWait coro = work();
+        while(!coro.done()) {
+            coro.resume();
+            if(!coro.done())
+                fd_queue.wait_for_data();
+        }
     });
 }
 
@@ -134,12 +135,12 @@ int Lottery::handle_receice_event(io_uring_cqe *cqe, string& message) {
         if (message == "Request : Lottery(1)\n") {
             auto tmp = make_pair(fd,1);
             fd_queue.enqueue(tmp);
-            fd_queue.on_data_ready_uring();
+            fd_queue.on_data_ready();
         }
         else if(message == "Request : Lottery(10)\n") {
             auto tmp = make_pair(fd,10);
             fd_queue.enqueue(tmp);
-            fd_queue.on_data_ready_uring();
+            fd_queue.on_data_ready();
         }
 //    else
 //        message = "Please send corrert Request\n";
@@ -147,7 +148,6 @@ int Lottery::handle_receice_event(io_uring_cqe *cqe, string& message) {
             message = it->second;
         } else break;
     }
-
     if(!it->second.empty())
         submit_receice_event(fd);
     else submit_listen_event(fd);
@@ -196,9 +196,9 @@ CoroWait Lottery::work() {
         int message;
         for (int i = 0; i < tmp.second; i++) {
             bool res;
-            if (!res_queue.dequeue_uring(res)) {
+            if (!res_queue.dequeue(res)) {
                 generate_random_result();
-                res_queue.dequeue_uring(res);
+                res_queue.dequeue(res);
             }
             if (res) message |= 1 << i;
         }
