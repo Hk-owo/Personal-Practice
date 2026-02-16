@@ -47,7 +47,7 @@ ThreadPool::ThreadPool() {
 //            while(!stop.load(memory_order_relaxed)){
 //                if(!m_queue[TSIZE - 1].dequeue(task)) {
 //                    for(int i = 0;i < TSIZE - 1;i++)
-//                        m_queue[i].on_data_ready();
+//                        m_queue[i].on_data_ready_uring();
 //                    if(!m_queue[TSIZE - 1].dequeue(task)) break;
 //                }
 //
@@ -55,7 +55,7 @@ ThreadPool::ThreadPool() {
 //                if(task && !(batch & (BATCH_SIZE - 1))){
 //                    //入队
 //                    m_queue[minldx].enqueue(task);
-//                    m_queue[minldx].on_data_ready();
+//                    m_queue[minldx].on_data_ready_uring();
 //                    batch = 0;
 //                }
 //                else if(task){
