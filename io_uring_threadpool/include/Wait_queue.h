@@ -12,7 +12,7 @@
  * 没做多线程竞争冗余
  * 多消费者会free句柄多次
  * 目前只做SPSC的单消费者
- * 有uring后缀的是用io_uring来实现的阻塞等待队列，速度较慢
+ * 有uring后缀的是用io_uring来实现的阻塞等待队列
  * 还有就是协程和uring混合实现的阻塞等待队列
  * 最后就是完全由协程实现的消息队列，但是需要一个而外的不会终止线程来处理，因为协程挂起以后线程会直接继续执行后面的内容，导致线程提前结束，可以把一个线程当两个使用来解决
  */
@@ -24,6 +24,7 @@ private:
     struct io_uring ring;
     struct io_uring_cqe* cqe;
     int ring_fd, peek_times = 1;
+    std::atomic<bool> suspend{true};
 
     T result{};
 public:
@@ -66,7 +67,11 @@ public:
 
 template<typename T>
 void Wait_queue<T>::wait_for_data() noexcept {
-    wait_for_data_uring();
+    if(!(peek_times & ((1 << 18) - 1 ))){
+        peek_times = 1;
+        wait_uring();
+    }
+    else peek_uring();
 }
 
 template<typename T>
@@ -120,18 +125,22 @@ void Wait_queue<T>::notify_stop_uring() noexcept {
 
 template<typename T>
 void Wait_queue<T>::wait_for_data_uring() noexcept {
+    suspend.store(true,std::memory_order_release);
     if(!(peek_times & ((1 << 18) - 1 ))){
         peek_times = 1;
         wait_uring();
     }
     else peek_uring();
+    suspend.store(false,std::memory_order_release);
 }
 
 template<typename T>
 void Wait_queue<T>::on_data_ready_uring() noexcept {
-    io_uring_sqe* sqe = io_uring_get_sqe(&ring);
-    sqe->user_data = 0;
-    io_uring_submit(&ring);
+    if(suspend.load(std::memory_order_acquire)) {
+        io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+        sqe->user_data = 0;
+        io_uring_submit(&ring);
+    }
 }
 
 template<typename T>
@@ -142,7 +151,7 @@ Wait_queue<T>::~Wait_queue() {
 
 template<typename T>
 Wait_queue<T>::Wait_queue() {
-    ring_fd = io_uring_queue_init(256, &ring, 0);
+    ring_fd = io_uring_queue_init(16, &ring, 0);
     if(ring_fd < 0){
         std::cerr << "create fd faild.\n";
         return;
