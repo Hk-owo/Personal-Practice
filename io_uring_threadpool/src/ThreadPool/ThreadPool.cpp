@@ -51,24 +51,32 @@ ThreadPool::ThreadPool() {
 //                    if(!m_queue[TSIZE - 1].dequeue(task)) break;
 //                }
 //
-//                //如果存货达到BATCH_SIZE时候唤醒
-//                if(task && !(batch & (BATCH_SIZE - 1))){
-//                    //入队
-//                    m_queue[minldx].enqueue(task);
-//                    m_queue[minldx].on_data_ready_uring();
-//                    batch = 0;
-//                }
-//                else if(task){
-//                    //分发的时候选择最少任务的派发实现负载均衡(每MINLDX_SIZE任务采样一次)
-//                    if (!(batch & (MINLDX_SIZE - 1))) {
-//                        for (int i = 0; i < TSIZE - 1; ++i)
-//                            if (m_queue[i].size() < m_queue[minldx].size()) minldx = i;
-//                    }
-//                    //入队
-//                    m_queue[minldx].enqueue(task);
-//                    batch++;
-//                }
-//                task = nullptr;
+//        //如果存货达到BATCH_SIZE时候唤醒
+//        if(task && !(batch & (BATCH_SIZE - 1))){
+//        //严重破坏了线程池的速度
+////            for (int i = 0; i < TSIZE - 1; ++i)
+////                if (m_queue[i].size() < m_queue[minldx].size()) minldx = i;
+////            //入队
+////            m_queue[minldx].enqueue(task);
+////            m_queue[minldx].on_data_ready();
+//            m_queue[batch & (TSIZE - 2)].enqueue(task);
+//            for(int i = 0;i < TSIZE - 1;i++)
+//                m_queue[i].on_data_ready();
+//            batch = 1;
+//        }
+//        else if(task){
+//        //严重破坏了线程池的速度
+////            //分发的时候选择最少任务的派发实现负载均衡(每MINLDX_SIZE任务采样一次)
+////            if (!(batch & (MINLDX_SIZE - 1))) {
+////                for (int i = 0; i < TSIZE - 1; ++i)
+////                    if (m_queue[i].size() < m_queue[minldx].size()) minldx = i;
+////            }
+////            //入队
+////            m_queue[minldx].enqueue(task);
+//            m_queue[batch & (TSIZE - 2)].enqueue(task);
+//            batch++;
+//        }
+//        task = nullptr;
 //            }
 //            m_queue[TSIZE - 1].wait_for_data_uring();
 //        }
@@ -101,8 +109,8 @@ CoroWait ThreadPool::work(int i) {
 //分发线程的协程
 CoroWait ThreadPool::distribute() {
     std::function<void()> task;
-    size_t minldx = 0;
-    size_t batch = 0;
+//    size_t minldx = 0;
+    size_t batch = 1;
     while(!stop.load(memory_order_relaxed)){
         if(!m_queue[TSIZE - 1].dequeue(task)) {
             for(int i = 0;i < TSIZE - 1;i++)
@@ -112,19 +120,27 @@ CoroWait ThreadPool::distribute() {
 
         //如果存货达到BATCH_SIZE时候唤醒
         if(task && !(batch & (BATCH_SIZE - 1))){
-            //入队
-            m_queue[minldx].enqueue(task);
-            m_queue[minldx].on_data_ready();
-            batch = 0;
+            //严重破坏了线程池的速度
+//            for (int i = 0; i < TSIZE - 1; ++i)
+//                if (m_queue[i].size() < m_queue[minldx].size()) minldx = i;
+//            //入队
+//            m_queue[minldx].enqueue(task);
+//            m_queue[minldx].on_data_ready();
+            m_queue[batch & (TSIZE - 2)].enqueue(task);
+            for(int i = 0;i < TSIZE - 1;i++)
+                m_queue[i].on_data_ready();
+            batch = 1;
         }
         else if(task){
-            //分发的时候选择最少任务的派发实现负载均衡(每MINLDX_SIZE任务采样一次)
-            if (!(batch & (MINLDX_SIZE - 1))) {
-                for (int i = 0; i < TSIZE - 1; ++i)
-                    if (m_queue[i].size() < m_queue[minldx].size()) minldx = i;
-            }
-            //入队
-            m_queue[minldx].enqueue(task);
+            //严重破坏了线程池的速度
+//            //分发的时候选择最少任务的派发实现负载均衡(每MINLDX_SIZE任务采样一次)
+//            if (!(batch & (MINLDX_SIZE - 1))) {
+//                for (int i = 0; i < TSIZE - 1; ++i)
+//                    if (m_queue[i].size() < m_queue[minldx].size()) minldx = i;
+//            }
+//            //入队
+//            m_queue[minldx].enqueue(task);
+            m_queue[batch & (TSIZE - 2)].enqueue(task);
             batch++;
         }
         task = nullptr;
