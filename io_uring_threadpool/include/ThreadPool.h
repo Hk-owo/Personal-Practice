@@ -8,14 +8,14 @@
 #include "Wait_queue.h"
 
 /*
- * 默认6线程
- * 5个工作线程
+ * 默认5线程
+ * 4个工作线程(工作线程一定要是2的幂次)
  * 1个分发线程
  */
 class ThreadPool {
 private:
     //线程数量
-    static const size_t TSIZE = 6;
+    static const size_t TSIZE = 5;
 
     //批次处理的数目 采样频率
     //一定要是2的幂次，后面采用的是位运算
