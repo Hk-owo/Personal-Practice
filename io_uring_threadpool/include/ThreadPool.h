@@ -20,7 +20,7 @@ private:
     //批次处理的数目 采样频率
     //一定要是2的幂次，后面采用的是位运算
     //根据任务执行时长调整大小
-    const size_t BATCH_SIZE = 256, MINLDX_SIZE = 128;
+    const size_t BATCH_SIZE = 1 << 10, MINLDX_SIZE = 128;
 
     //线程池总开关
     std::atomic<bool> stop{false};
